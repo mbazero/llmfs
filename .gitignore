@@ -1,0 +1,14 @@
+# Rust
+/target/
+**/*.rs.bk
+Cargo.lock  # Include this for libraries, exclude for binaries
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db

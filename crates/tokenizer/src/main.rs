@@ -5,6 +5,8 @@ use regex::Regex;
 
 const TEXT_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/the-verdict.txt");
 
+pub mod tokenizer;
+
 fn main() -> Result<()> {
     let text: String = std::fs::read(TEXT_PATH)?.try_into()?;
     let re = Regex::new(r#"([,.:;?_!"()\']|--|\s)"#)?;

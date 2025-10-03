@@ -12,15 +12,15 @@ impl Splitter {
         }
     }
 
-    pub fn split<'a: 'b, 'b>(&'a self, text: &'b str) -> impl Iterator<Item = &'b str> {
-        struct Iter<'a> {
+    pub fn split<'a, 'b>(&'a self, text: &'b str) -> impl Iterator<Item = &'b str> + use<'a, 'b> {
+        struct Iter<'a, 'b> {
             delimiters: &'a [String],
-            next_delim: Option<&'a str>,
-            remaining: &'a str,
+            next_delim: Option<&'b str>,
+            remaining: &'b str,
         }
 
-        impl<'a> Iterator for Iter<'a> {
-            type Item = &'a str;
+        impl<'a, 'b> Iterator for Iter<'a, 'b> {
+            type Item = &'b str;
 
             fn next(&mut self) -> Option<Self::Item> {
                 if let Some(next_delim) = self.next_delim.take() {
@@ -54,7 +54,10 @@ impl Splitter {
         }
     }
 
-    pub fn split_filter<'a: 'b, 'b>(&'a self, text: &'b str) -> impl Iterator<Item = &'b str> {
+    pub fn split_filter<'a, 'b>(
+        &'a self,
+        text: &'b str,
+    ) -> impl Iterator<Item = &'b str> + use<'a, 'b> {
         self.split(text).filter_map(|s| {
             let s = s.trim();
             if s.is_empty() { None } else { Some(s) }

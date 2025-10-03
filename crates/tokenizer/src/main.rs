@@ -1,29 +1,28 @@
 use anyhow::Result;
 use indexmap::IndexMap;
 use itertools::Itertools;
-use regex::Regex;
+
+use crate::splitter::Splitter;
 
 const TEXT_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/the-verdict.txt");
 
+pub mod splitter;
 pub mod tokenizer;
 
 fn main() -> Result<()> {
     let text: String = std::fs::read(TEXT_PATH)?.try_into()?;
-    let re = Regex::new(r#"([,.:;?_!"()\']|--|\s)"#)?;
+    let splitter = Splitter::default();
 
-    // TODO: Don't discard delimiters
-    let vocab: IndexMap<_, _> = re
-        .split(&text)
-        .filter_map(|s| {
-            let s = s.trim();
-            if s.is_empty() { None } else { Some(s) }
-        })
+    let vocab: IndexMap<_, _> = splitter
+        .split_filter(&text)
         .unique()
         .sorted()
         .zip(0usize..)
         .collect();
 
-    dbg!(vocab.iter().take(10).collect::<Vec<_>>());
+    for (i, s) in vocab.iter().take(10) {
+        println!("{s}: {i}");
+    }
 
     Ok(())
 }

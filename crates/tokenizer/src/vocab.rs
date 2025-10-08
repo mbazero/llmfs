@@ -3,11 +3,24 @@ use itertools::Itertools;
 
 use crate::splitter::Splitter;
 
-pub struct Vocab<'a>(IndexSet<&'a str>);
+const EOT_TOKEN: &str = "<|endoftext|>";
+const UNK_TOKEN: &str = "<|unk|>";
+
+pub struct Vocab<'a> {
+    mapping: IndexSet<&'a str>,
+    unk_id: usize,
+}
 
 impl<'a> Vocab<'a> {
     pub fn from_tokens(tokens: impl IntoIterator<Item = &'a str>) -> Self {
-        Self(tokens.into_iter().unique().sorted().collect())
+        let mapping: IndexSet<_> = tokens
+            .into_iter()
+            .unique()
+            .sorted()
+            .chain([EOT_TOKEN, UNK_TOKEN])
+            .collect();
+        let unk_id = mapping.get_index_of(UNK_TOKEN).unwrap();
+        Self { mapping, unk_id }
     }
 
     pub fn from_corpus(corpus: &'a str, splitter: &Splitter) -> Self {
@@ -15,10 +28,10 @@ impl<'a> Vocab<'a> {
     }
 
     pub fn get_token(&self, id: usize) -> Option<&'a str> {
-        self.0.get_index(id).copied()
+        self.mapping.get_index(id).copied()
     }
 
-    pub fn get_id(&self, token: &str) -> Option<usize> {
-        self.0.get_index_of(token)
+    pub fn get_id(&self, token: &str) -> usize {
+        self.mapping.get_index_of(token).unwrap_or(self.unk_id)
     }
 }

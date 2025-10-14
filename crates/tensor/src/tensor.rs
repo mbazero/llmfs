@@ -1,14 +1,10 @@
 use std::fmt::Debug;
 use std::{
-    collections::{HashMap, VecDeque},
-    hash::Hash,
-    iter::Sum,
     ops::{Add, Div, Mul, Neg, Sub},
     rc::Rc,
 };
 
 use approx::AbsDiffEq;
-use uuid::Uuid;
 
 mod fns {
     use crate::tensor::Tensor;
@@ -19,25 +15,76 @@ mod fns {
     ) -> Tensor<D> {
         const EPS: f64 = 1e-12;
         let input = input.clamp(EPS, 1.0 - EPS);
-        let ones = Tensor::ones(input.shape);
+        let ones = Tensor::ones(input.data.shape);
         -(target * input.ln() + (&ones - target) * (&ones - &input).ln())
     }
 }
 
-#[derive(Debug)]
-pub struct Tensor<const D: usize> {
-    data: Vec<f64>,
+#[derive(Debug, PartialEq)]
+pub struct TensorData<const D: usize> {
     shape: [usize; D],
-    grad_fn: Box<dyn GradFn<D>>,
+    inner: Vec<f64>,
+}
+
+impl<const D: usize> TensorData<D> {
+    pub fn len(&self) -> usize {
+        self.inner.len()
+    }
+
+    fn unary_op(&self, op: impl Fn(f64) -> f64) -> Self {
+        Self {
+            shape: self.shape,
+            inner: self.inner.iter().map(|&x| op(x)).collect(),
+        }
+    }
+
+    fn binary_op(&self, rhs: &TensorData<D>, op: impl Fn(f64, f64) -> f64) -> Self {
+        assert_eq!(self.shape, rhs.shape, "tensor shapes must be equal");
+        Self {
+            shape: self.shape,
+            inner: self
+                .inner
+                .iter()
+                .zip(&rhs.inner)
+                .map(|(&a, &b)| op(a, b))
+                .collect(),
+        }
+    }
+}
+
+impl<const D: usize> AbsDiffEq for TensorData<D> {
+    type Epsilon = f64;
+
+    fn default_epsilon() -> Self::Epsilon {
+        f64::default_epsilon()
+    }
+
+    fn abs_diff_eq(&self, other: &Self, epsilon: Self::Epsilon) -> bool {
+        assert_eq!(self.shape, other.shape, "tensor shapes must be equal");
+        self.inner
+            .iter()
+            .zip(&other.inner)
+            .all(|(a, b)| a.abs_diff_eq(b, epsilon))
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct Tensor<const D: usize> {
+    data: Rc<TensorData<D>>,
+    grad_fn: Option<Rc<dyn GradFn<D>>>,
 }
 
 impl<const D: usize> PartialEq for Tensor<D> {
     fn eq(&self, other: &Self) -> bool {
-        self.data == other.data && self.shape == other.shape
+        self.data == other.data
     }
 }
 
 impl<const D: usize> Tensor<D> {
+    pub fn from_data(data: TensorData<D>) -> Self {
+        IdentityGradFn(Rc::new(data)).forward()
+    }
+
     pub fn full(shape: [usize; D], value: f64) -> Self {
         let data_len = shape
             .iter()
@@ -45,11 +92,12 @@ impl<const D: usize> Tensor<D> {
             .reduce(|a, b| a * b)
             .expect("shape should not be empty");
 
-        Self {
-            data: vec![value; data_len],
+        let data = TensorData {
             shape,
-            grad_fn: Box::new(ConstGradFn),
-        }
+            inner: vec![value; data_len],
+        };
+
+        Self::from_data(data)
     }
 
     pub fn zeros(shape: [usize; D]) -> Self {
@@ -60,74 +108,72 @@ impl<const D: usize> Tensor<D> {
         Self::full(shape, 1.0)
     }
 
+    pub fn ptr_eq(&self, other: &Tensor<D>) -> bool {
+        Rc::ptr_eq(&self.data, &other.data)
+    }
+
+    pub fn neg(&self) -> Tensor<D> {
+        grad_fns::neg(self.clone()).forward()
+    }
+
     pub fn exp(&self) -> Tensor<D> {
-        self.unary_op(f64::exp)
+        grad_fns::exp(self.clone()).forward()
     }
 
     pub fn ln(&self) -> Tensor<D> {
-        self.unary_op(f64::ln)
+        grad_fns::ln(self.clone()).forward()
     }
 
     pub fn log(&self, base: f64) -> Tensor<D> {
-        self.unary_op(|x| x.log(base))
+        grad_fns::log(self.clone(), base).forward()
     }
 
     pub fn clamp(&self, min: f64, max: f64) -> Tensor<D> {
-        self.unary_op(|x| x.clamp(min, max))
+        grad_fns::clamp(self.clone(), min, max).forward()
     }
 
     pub fn sigmoid(&self) -> Tensor<D> {
-        Tensor::ones(self.shape) / (Tensor::ones(self.shape) + (-self).exp())
+        Tensor::ones(self.data.shape) / (Tensor::ones(self.data.shape) + (-self).exp())
+    }
+
+    fn add(&self, rhs: &Tensor<D>) -> Tensor<D> {
+        grad_fns::add(self.clone(), rhs.clone()).forward()
+    }
+
+    fn sub(&self, rhs: &Tensor<D>) -> Tensor<D> {
+        grad_fns::add(self.clone(), rhs.neg()).forward()
+    }
+
+    fn mul(&self, rhs: &Tensor<D>) -> Tensor<D> {
+        grad_fns::mul(self.clone(), rhs.clone()).forward()
+    }
+
+    fn div(&self, rhs: &Tensor<D>) -> Tensor<D> {
+        grad_fns::div(self.clone(), rhs.clone()).forward()
     }
 
     pub fn sum(&self) -> f64 {
-        self.data.iter().sum()
+        self.data.inner.iter().sum()
     }
 
     pub fn mean(&self) -> f64 {
         self.sum() / self.data.len() as f64
     }
 
-    fn add(&self, rhs: &Tensor<D>) -> Tensor<D> {
-        let data = self
-            .data
-            .iter()
-            .zip(&rhs.data)
-            .map(|(&a, &b)| a + b)
-            .collect();
+    pub fn grad(&self, diff_var: &Tensor<D>) -> Tensor<D> {
+        todo!()
+    }
+}
 
-        Self {
-            shape: self.shape,
-            data,
-            grad_fn: Box::new(AddGradFn { a: self, b: rhs }),
-        }
+impl<const D: usize> AbsDiffEq for Tensor<D> {
+    type Epsilon = <TensorData<D> as AbsDiffEq>::Epsilon;
+
+    fn default_epsilon() -> Self::Epsilon {
+        TensorData::<D>::default_epsilon()
     }
 
-    fn unary_op<'a, G: UnaryGradFn<'a, D>>(&'a self, mut op: impl FnMut(f64) -> f64) -> Tensor<D> {
-        let grad_fn = G::new(self);
-        Tensor {
-            shape: self.shape,
-            data: self.data.iter().map(|&x| op(x)).collect(),
-            grad_fn: Box::new(grad_fn),
-        }
-    }
-
-    fn binary_op<'a, 'b, G: BinaryGradFn<'a, 'b, D> + 'static>(
-        &'a self,
-        mut op: impl FnMut(f64, f64) -> f64,
-        rhs: &'b Tensor<D>,
-    ) -> Tensor<D> {
-        assert_eq!(self.shape, rhs.shape, "tensor shapes must be equal");
-        Tensor {
-            shape: self.shape,
-            data: self
-                .data
-                .iter()
-                .zip(&rhs.data)
-                .map(|(&a, &b)| op(a, b))
-                .collect(),
-            grad_fn: Box::new(G::new(self, rhs)),
-        }
+    fn abs_diff_eq(&self, other: &Self, epsilon: Self::Epsilon) -> bool {
+        self.data.abs_diff_eq(&other.data, epsilon)
     }
 }
 
@@ -135,7 +181,7 @@ impl<const D: usize> Neg for Tensor<D> {
     type Output = Tensor<D>;
 
     fn neg(self) -> Self::Output {
-        self.unary_op(f64::neg)
+        Tensor::neg(&self)
     }
 }
 
@@ -143,7 +189,7 @@ impl<const D: usize> Neg for &Tensor<D> {
     type Output = Tensor<D>;
 
     fn neg(self) -> Self::Output {
-        self.unary_op(f64::neg)
+        Tensor::neg(self)
     }
 }
 
@@ -151,7 +197,7 @@ impl<const D: usize> Add<&Tensor<D>> for &Tensor<D> {
     type Output = Tensor<D>;
 
     fn add(self, rhs: &Tensor<D>) -> Self::Output {
-        self.binary_op(|a, b| a + b, rhs)
+        Tensor::add(self, rhs)
     }
 }
 
@@ -159,7 +205,7 @@ impl<const D: usize> Add<&Tensor<D>> for Tensor<D> {
     type Output = Tensor<D>;
 
     fn add(self, rhs: &Tensor<D>) -> Self::Output {
-        self.binary_op(|a, b| a + b, rhs)
+        Tensor::add(&self, rhs)
     }
 }
 
@@ -167,7 +213,7 @@ impl<const D: usize> Add<Tensor<D>> for Tensor<D> {
     type Output = Tensor<D>;
 
     fn add(self, rhs: Tensor<D>) -> Self::Output {
-        self.binary_op(|a, b| a + b, &rhs)
+        Tensor::add(&self, &rhs)
     }
 }
 
@@ -175,7 +221,7 @@ impl<const D: usize> Sub<&Tensor<D>> for &Tensor<D> {
     type Output = Tensor<D>;
 
     fn sub(self, rhs: &Tensor<D>) -> Self::Output {
-        self.binary_op(|a, b| a - b, rhs)
+        Tensor::sub(self, rhs)
     }
 }
 
@@ -183,7 +229,7 @@ impl<const D: usize> Sub<&Tensor<D>> for Tensor<D> {
     type Output = Tensor<D>;
 
     fn sub(self, rhs: &Tensor<D>) -> Self::Output {
-        self.binary_op(|a, b| a - b, rhs)
+        Tensor::sub(&self, rhs)
     }
 }
 
@@ -191,7 +237,7 @@ impl<const D: usize> Sub<Tensor<D>> for Tensor<D> {
     type Output = Tensor<D>;
 
     fn sub(self, rhs: Tensor<D>) -> Self::Output {
-        self.binary_op(|a, b| a - b, &rhs)
+        Tensor::sub(&self, &rhs)
     }
 }
 
@@ -199,7 +245,7 @@ impl<const D: usize> Mul<&Tensor<D>> for &Tensor<D> {
     type Output = Tensor<D>;
 
     fn mul(self, rhs: &Tensor<D>) -> Self::Output {
-        self.binary_op(|a, b| a * b, rhs)
+        Tensor::mul(self, rhs)
     }
 }
 
@@ -207,7 +253,7 @@ impl<const D: usize> Mul<&Tensor<D>> for Tensor<D> {
     type Output = Tensor<D>;
 
     fn mul(self, rhs: &Tensor<D>) -> Self::Output {
-        self.binary_op(|a, b| a * b, rhs)
+        Tensor::mul(&self, rhs)
     }
 }
 
@@ -215,7 +261,7 @@ impl<const D: usize> Mul<Tensor<D>> for &Tensor<D> {
     type Output = Tensor<D>;
 
     fn mul(self, rhs: Tensor<D>) -> Self::Output {
-        self.binary_op(|a, b| a * b, &rhs)
+        Tensor::mul(self, &rhs)
     }
 }
 
@@ -223,7 +269,7 @@ impl<const D: usize> Mul<Tensor<D>> for Tensor<D> {
     type Output = Tensor<D>;
 
     fn mul(self, rhs: Tensor<D>) -> Self::Output {
-        self.binary_op(|a, b| a * b, &rhs)
+        Tensor::mul(&self, &rhs)
     }
 }
 
@@ -231,7 +277,7 @@ impl<const D: usize> Div<&Tensor<D>> for &Tensor<D> {
     type Output = Tensor<D>;
 
     fn div(self, rhs: &Tensor<D>) -> Self::Output {
-        self.binary_op(|a, b| a / b, rhs)
+        Tensor::div(self, rhs)
     }
 }
 
@@ -239,7 +285,7 @@ impl<const D: usize> Div<&Tensor<D>> for Tensor<D> {
     type Output = Tensor<D>;
 
     fn div(self, rhs: &Tensor<D>) -> Self::Output {
-        self.binary_op(|a, b| a / b, rhs)
+        Tensor::div(&self, rhs)
     }
 }
 
@@ -247,141 +293,175 @@ impl<const D: usize> Div<Tensor<D>> for Tensor<D> {
     type Output = Tensor<D>;
 
     fn div(self, rhs: Tensor<D>) -> Self::Output {
-        self.binary_op(|a, b| a / b, &rhs)
-    }
-}
-
-impl<const D: usize> AbsDiffEq for Tensor<D> {
-    type Epsilon = f64;
-
-    fn default_epsilon() -> Self::Epsilon {
-        f64::default_epsilon()
-    }
-
-    fn abs_diff_eq(&self, other: &Self, epsilon: Self::Epsilon) -> bool {
-        assert_eq!(self.shape, other.shape, "tensor shapes must be equal");
-        self.data
-            .iter()
-            .zip(&other.data)
-            .all(|(a, b)| a.abs_diff_eq(b, epsilon))
+        Tensor::div(&self, &rhs)
     }
 }
 
 impl<const N: usize> From<[f64; N]> for Tensor<1> {
     fn from(value: [f64; N]) -> Self {
-        Self {
+        Self::from_data(TensorData {
             shape: [value.len()],
-            data: value.into(),
-            grad_fn: Box::new(ConstGradFn),
+            inner: value.into(),
+        })
+    }
+}
+
+pub mod grad_fns {
+    use super::*;
+
+    pub fn neg<const D: usize>(a: Tensor<D>) -> impl GradFn<D> {
+        UnaryGradFn {
+            name: "Neg",
+            a,
+            fwd_fn: f64::neg,
+        }
+    }
+
+    pub fn exp<const D: usize>(a: Tensor<D>) -> impl GradFn<D> {
+        UnaryGradFn {
+            name: "Exp",
+            a,
+            fwd_fn: f64::exp,
+        }
+    }
+
+    pub fn ln<const D: usize>(a: Tensor<D>) -> impl GradFn<D> {
+        UnaryGradFn {
+            name: "Ln",
+            a,
+            fwd_fn: f64::ln,
+        }
+    }
+
+    pub fn log<const D: usize>(a: Tensor<D>, base: f64) -> impl GradFn<D> {
+        UnaryGradFn {
+            name: "Log",
+            a,
+            fwd_fn: move |x| x.log(base),
+        }
+    }
+
+    pub fn clamp<const D: usize>(a: Tensor<D>, min: f64, max: f64) -> impl GradFn<D> {
+        UnaryGradFn {
+            name: "Log",
+            a,
+            fwd_fn: move |x| x.clamp(min, max),
+        }
+    }
+
+    pub fn add<const D: usize>(a: Tensor<D>, b: Tensor<D>) -> impl GradFn<D> {
+        BinaryGradFn {
+            name: "Add",
+            a,
+            b,
+            fwd_fn: f64::add,
+        }
+    }
+
+    pub fn mul<const D: usize>(a: Tensor<D>, b: Tensor<D>) -> impl GradFn<D> {
+        BinaryGradFn {
+            name: "Mul",
+            a,
+            b,
+            fwd_fn: f64::mul,
+        }
+    }
+
+    pub fn div<const D: usize>(a: Tensor<D>, b: Tensor<D>) -> impl GradFn<D> {
+        BinaryGradFn {
+            name: "Div",
+            a,
+            b,
+            fwd_fn: f64::div,
         }
     }
 }
 
-pub trait GradFn<const D: usize>: Debug {
-    fn grad(&self, diff_var: Tensor<D>) -> Tensor<D>;
+pub trait GradFn<const D: usize> {
+    fn name(&self) -> &str;
+
+    fn forward(self) -> Tensor<D>;
+
+    fn backward(&self, diff_var: Tensor<D>) -> Tensor<D>;
 }
 
-pub trait UnaryGradFn<'a, const D: usize>: GradFn<D> {
-    fn new(a: &'a Tensor<D>) -> Self
-    where
-        Self: Sized;
-}
-
-pub trait BinaryGradFn<'a, 'b, const D: usize>: GradFn<D> {
-    fn new(a: &'a Tensor<D>, b: &'b Tensor<D>) -> Self
-    where
-        Self: Sized;
-}
-
-#[derive(Debug, PartialEq, Eq)]
-pub struct ConstGradFn;
-
-impl<const D: usize> GradFn<D> for ConstGradFn {
-    fn grad(&self, diff_var: Tensor<D>) -> Tensor<D> {
-        Tensor::zeros(diff_var.shape)
+impl<const D: usize> std::fmt::Debug for dyn GradFn<D> + '_ {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.name())
     }
 }
 
 #[derive(Debug, PartialEq)]
-pub struct AddGradFn<'a, 'b, const D: usize> {
-    a: &'a Tensor<D>,
-    b: &'b Tensor<D>,
-}
+pub struct IdentityGradFn<const D: usize>(Rc<TensorData<D>>);
 
-impl<'a, 'b, const D: usize> GradFn<D> for AddGradFn<'a, 'b, D> {
-    fn grad(&self, diff_var: Tensor<D>) -> Tensor<D> {
-        todo!()
-    }
-}
-
-impl<'a, 'b, const D: usize> BinaryGradFn<'a, 'b, D> for AddGradFn<'a, 'b, D> {
-    fn new(a: &'a Tensor<D>, b: &'b Tensor<D>) -> Self
-    where
-        Self: Sized,
-    {
-        Self { a, b }
-    }
-}
-
-pub enum Op {
-    Identity,
-    Add,
-    Mul,
-    Sigmoid,
-    BinaryCrossEntropy,
-}
-
-pub struct ComputeNode {
-    id: Uuid,
-    inputs: Vec<Rc<ComputeNode>>,
-    op: Op,
-}
-
-impl ComputeNode {
-    pub fn grad(&self, diff_node: &Rc<ComputeNode>) -> ComputeNode {
-        todo!()
+impl<const D: usize> GradFn<D> for IdentityGradFn<D> {
+    fn name(&self) -> &str {
+        "IdentityGradFn"
     }
 
-    pub fn eval(&self) -> Tensor<1> {
-        todo!()
-    }
-}
-
-impl PartialEq for ComputeNode {
-    fn eq(&self, other: &Self) -> bool {
-        self.id == other.id
-    }
-}
-
-impl Eq for ComputeNode {}
-
-impl Hash for ComputeNode {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.id.hash(state);
-    }
-}
-
-pub fn grad(output: Rc<ComputeNode>, input: Rc<ComputeNode>) -> Tensor<1> {
-    let mut q = VecDeque::from([&output]);
-    let mut parents = HashMap::new();
-    while let Some(cur) = q.pop_front() {
-        for child in &cur.inputs {
-            parents.insert(child, cur);
-            if child == &input {
-                break;
-            }
+    fn forward(self) -> Tensor<D> {
+        Tensor {
+            data: Rc::clone(&self.0),
+            grad_fn: Some(Rc::new(self)),
         }
     }
 
-    let mut diff_node = &input;
-    let mut diff_chain = Vec::new();
-    while let Some(&parent) = parents.get(&diff_node) {
-        diff_chain.push(parent.grad(diff_node));
-        diff_node = parent;
+    fn backward(&self, diff_var: Tensor<D>) -> Tensor<D> {
+        if Rc::ptr_eq(&self.0, &diff_var.data) {
+            Tensor::ones(self.0.shape)
+        } else {
+            Tensor::zeros(self.0.shape)
+        }
+    }
+}
+
+#[derive(PartialEq)]
+pub struct UnaryGradFn<const D: usize, F: Fn(f64) -> f64> {
+    name: &'static str,
+    a: Tensor<D>,
+    fwd_fn: F,
+}
+
+impl<const D: usize, F: Fn(f64) -> f64 + Copy + 'static> GradFn<D> for UnaryGradFn<D, F> {
+    fn name(&self) -> &str {
+        self.name
     }
 
-    // diff_chain.iter().map(ComputeNode::eval).sum()
-    todo!()
+    fn forward(self) -> Tensor<D> {
+        Tensor {
+            data: Rc::new(self.a.data.unary_op(self.fwd_fn)),
+            grad_fn: Some(Rc::new(self)),
+        }
+    }
+
+    fn backward(&self, diff_var: Tensor<D>) -> Tensor<D> {
+        todo!()
+    }
+}
+
+#[derive(PartialEq)]
+pub struct BinaryGradFn<const D: usize, F: Fn(f64, f64) -> f64> {
+    name: &'static str,
+    a: Tensor<D>,
+    b: Tensor<D>,
+    fwd_fn: F,
+}
+
+impl<const D: usize, F: Fn(f64, f64) -> f64 + Copy + 'static> GradFn<D> for BinaryGradFn<D, F> {
+    fn name(&self) -> &str {
+        self.name
+    }
+
+    fn forward(self) -> Tensor<D> {
+        Tensor {
+            data: Rc::new(self.a.data.binary_op(&self.b.data, self.fwd_fn)),
+            grad_fn: Some(Rc::new(self)),
+        }
+    }
+
+    fn backward(&self, diff_var: Tensor<D>) -> Tensor<D> {
+        todo!()
+    }
 }
 
 #[cfg(test)]
@@ -402,6 +482,11 @@ mod tests {
 
         let loss = fns::binary_cross_entropy(&a, &y);
 
-        assert_abs_diff_eq!(0.0852, loss.mean(), epsilon = 1e-4);
+        let grad_loss_w1 = loss.grad(&w1);
+        let grad_loss_b = loss.grad(&b);
+
+        assert_abs_diff_eq!(Tensor::from([0.0852]), loss, epsilon = 1e-4);
+        assert_abs_diff_eq!(Tensor::from([-0.0898]), grad_loss_w1, epsilon = 1e-4);
+        assert_abs_diff_eq!(Tensor::from([-0.0817]), grad_loss_b, epsilon = 1e-4);
     }
 }

@@ -1,3 +1,4 @@
+use std::fmt::Debug;
 use std::{
     collections::{HashMap, VecDeque},
     hash::Hash,
@@ -23,10 +24,17 @@ mod fns {
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug)]
 pub struct Tensor<const D: usize> {
     data: Vec<f64>,
     shape: [usize; D],
+    grad_fn: Box<dyn GradFn<D>>,
+}
+
+impl<const D: usize> PartialEq for Tensor<D> {
+    fn eq(&self, other: &Self) -> bool {
+        self.data == other.data && self.shape == other.shape
+    }
 }
 
 impl<const D: usize> Tensor<D> {
@@ -40,6 +48,7 @@ impl<const D: usize> Tensor<D> {
         Self {
             data: vec![value; data_len],
             shape,
+            grad_fn: Box::new(ConstGradFn),
         }
     }
 
@@ -79,14 +88,35 @@ impl<const D: usize> Tensor<D> {
         self.sum() / self.data.len() as f64
     }
 
-    fn unary_op(&self, mut op: impl FnMut(f64) -> f64) -> Tensor<D> {
-        Tensor {
+    fn add(&self, rhs: &Tensor<D>) -> Tensor<D> {
+        let data = self
+            .data
+            .iter()
+            .zip(&rhs.data)
+            .map(|(&a, &b)| a + b)
+            .collect();
+
+        Self {
             shape: self.shape,
-            data: self.data.iter().map(|&x| op(x)).collect(),
+            data,
+            grad_fn: Box::new(AddGradFn { a: self, b: rhs }),
         }
     }
 
-    fn binary_op(&self, mut op: impl FnMut(f64, f64) -> f64, rhs: &Tensor<D>) -> Tensor<D> {
+    fn unary_op<'a, G: UnaryGradFn<'a, D>>(&'a self, mut op: impl FnMut(f64) -> f64) -> Tensor<D> {
+        let grad_fn = G::new(self);
+        Tensor {
+            shape: self.shape,
+            data: self.data.iter().map(|&x| op(x)).collect(),
+            grad_fn: Box::new(grad_fn),
+        }
+    }
+
+    fn binary_op<'a, 'b, G: BinaryGradFn<'a, 'b, D> + 'static>(
+        &'a self,
+        mut op: impl FnMut(f64, f64) -> f64,
+        rhs: &'b Tensor<D>,
+    ) -> Tensor<D> {
         assert_eq!(self.shape, rhs.shape, "tensor shapes must be equal");
         Tensor {
             shape: self.shape,
@@ -96,6 +126,7 @@ impl<const D: usize> Tensor<D> {
                 .zip(&rhs.data)
                 .map(|(&a, &b)| op(a, b))
                 .collect(),
+            grad_fn: Box::new(G::new(self, rhs)),
         }
     }
 }
@@ -241,7 +272,54 @@ impl<const N: usize> From<[f64; N]> for Tensor<1> {
         Self {
             shape: [value.len()],
             data: value.into(),
+            grad_fn: Box::new(ConstGradFn),
         }
+    }
+}
+
+pub trait GradFn<const D: usize>: Debug {
+    fn grad(&self, diff_var: Tensor<D>) -> Tensor<D>;
+}
+
+pub trait UnaryGradFn<'a, const D: usize>: GradFn<D> {
+    fn new(a: &'a Tensor<D>) -> Self
+    where
+        Self: Sized;
+}
+
+pub trait BinaryGradFn<'a, 'b, const D: usize>: GradFn<D> {
+    fn new(a: &'a Tensor<D>, b: &'b Tensor<D>) -> Self
+    where
+        Self: Sized;
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct ConstGradFn;
+
+impl<const D: usize> GradFn<D> for ConstGradFn {
+    fn grad(&self, diff_var: Tensor<D>) -> Tensor<D> {
+        Tensor::zeros(diff_var.shape)
+    }
+}
+
+#[derive(Debug, PartialEq)]
+pub struct AddGradFn<'a, 'b, const D: usize> {
+    a: &'a Tensor<D>,
+    b: &'b Tensor<D>,
+}
+
+impl<'a, 'b, const D: usize> GradFn<D> for AddGradFn<'a, 'b, D> {
+    fn grad(&self, diff_var: Tensor<D>) -> Tensor<D> {
+        todo!()
+    }
+}
+
+impl<'a, 'b, const D: usize> BinaryGradFn<'a, 'b, D> for AddGradFn<'a, 'b, D> {
+    fn new(a: &'a Tensor<D>, b: &'b Tensor<D>) -> Self
+    where
+        Self: Sized,
+    {
+        Self { a, b }
     }
 }
 

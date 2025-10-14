@@ -6,7 +6,7 @@ use std::{
 
 use approx::AbsDiffEq;
 
-mod fns {
+pub mod fns {
     use crate::tensor::Tensor;
 
     pub fn binary_cross_entropy<const D: usize>(
@@ -29,6 +29,11 @@ pub struct TensorData<const D: usize> {
 impl<const D: usize> TensorData<D> {
     pub fn len(&self) -> usize {
         self.inner.len()
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
     }
 
     fn unary_op(&self, op: impl Fn(f64) -> f64) -> Self {
@@ -124,10 +129,6 @@ impl<const D: usize> Tensor<D> {
         grad_fns::ln(self.clone()).forward()
     }
 
-    pub fn log(&self, base: f64) -> Tensor<D> {
-        grad_fns::log(self.clone(), base).forward()
-    }
-
     pub fn clamp(&self, min: f64, max: f64) -> Tensor<D> {
         grad_fns::clamp(self.clone(), min, max).forward()
     }
@@ -161,7 +162,10 @@ impl<const D: usize> Tensor<D> {
     }
 
     pub fn grad(&self, diff_var: &Tensor<D>) -> Tensor<D> {
-        todo!()
+        self.grad_fn
+            .as_ref()
+            .expect("tensor should have a grad fn")
+            .backward(diff_var)
     }
 }
 
@@ -312,67 +316,68 @@ pub mod grad_fns {
     pub fn neg<const D: usize>(a: Tensor<D>) -> impl GradFn<D> {
         UnaryGradFn {
             name: "Neg",
-            a,
-            fwd_fn: f64::neg,
+            f: a,
+            forward_fn: f64::neg,
+            backward_fn: |_, df, _| -df,
         }
     }
 
     pub fn exp<const D: usize>(a: Tensor<D>) -> impl GradFn<D> {
         UnaryGradFn {
             name: "Exp",
-            a,
-            fwd_fn: f64::exp,
+            f: a,
+            forward_fn: f64::exp,
+            backward_fn: |f, df, _| f.exp() * df,
         }
     }
 
     pub fn ln<const D: usize>(a: Tensor<D>) -> impl GradFn<D> {
         UnaryGradFn {
             name: "Ln",
-            a,
-            fwd_fn: f64::ln,
-        }
-    }
-
-    pub fn log<const D: usize>(a: Tensor<D>, base: f64) -> impl GradFn<D> {
-        UnaryGradFn {
-            name: "Log",
-            a,
-            fwd_fn: move |x| x.log(base),
+            f: a,
+            forward_fn: f64::ln,
+            backward_fn: |f, df, _| df / f,
         }
     }
 
     pub fn clamp<const D: usize>(a: Tensor<D>, min: f64, max: f64) -> impl GradFn<D> {
         UnaryGradFn {
             name: "Log",
-            a,
-            fwd_fn: move |x| x.clamp(min, max),
+            f: a,
+            forward_fn: move |x| x.clamp(min, max),
+            backward_fn: move |f, df, _| {
+                if (min..=max).contains(&f) { df } else { 0.0 }
+            },
         }
     }
 
     pub fn add<const D: usize>(a: Tensor<D>, b: Tensor<D>) -> impl GradFn<D> {
         BinaryGradFn {
             name: "Add",
-            a,
-            b,
-            fwd_fn: f64::add,
+            f: a,
+            g: b,
+            forward_fn: f64::add,
+            backward_fn: |_, df, _, dg, _| df + dg,
         }
     }
 
     pub fn mul<const D: usize>(a: Tensor<D>, b: Tensor<D>) -> impl GradFn<D> {
         BinaryGradFn {
             name: "Mul",
-            a,
-            b,
-            fwd_fn: f64::mul,
+            f: a,
+            g: b,
+            forward_fn: f64::mul,
+            backward_fn: |f, df, g, dg, _| df * g + dg * f,
         }
     }
 
     pub fn div<const D: usize>(a: Tensor<D>, b: Tensor<D>) -> impl GradFn<D> {
         BinaryGradFn {
             name: "Div",
-            a,
-            b,
-            fwd_fn: f64::div,
+            f: a,
+            g: b,
+            forward_fn: f64::div,
+            backward_fn: |f, df, g, dg, _| (df * g - dg * f) / (g * g),
         }
     }
 }
@@ -382,7 +387,7 @@ pub trait GradFn<const D: usize> {
 
     fn forward(self) -> Tensor<D>;
 
-    fn backward(&self, diff_var: Tensor<D>) -> Tensor<D>;
+    fn backward(&self, diff_var: &Tensor<D>) -> Tensor<D>;
 }
 
 impl<const D: usize> std::fmt::Debug for dyn GradFn<D> + '_ {
@@ -406,7 +411,7 @@ impl<const D: usize> GradFn<D> for IdentityGradFn<D> {
         }
     }
 
-    fn backward(&self, diff_var: Tensor<D>) -> Tensor<D> {
+    fn backward(&self, diff_var: &Tensor<D>) -> Tensor<D> {
         if Rc::ptr_eq(&self.0, &diff_var.data) {
             Tensor::ones(self.0.shape)
         } else {
@@ -416,51 +421,108 @@ impl<const D: usize> GradFn<D> for IdentityGradFn<D> {
 }
 
 #[derive(PartialEq)]
-pub struct UnaryGradFn<const D: usize, F: Fn(f64) -> f64> {
+pub struct UnaryGradFn<const D: usize, F, B>
+where
+    F: Fn(f64) -> f64,
+    B: Fn(f64, f64, f64) -> f64,
+{
     name: &'static str,
-    a: Tensor<D>,
-    fwd_fn: F,
+    f: Tensor<D>,
+    forward_fn: F,
+    backward_fn: B,
 }
 
-impl<const D: usize, F: Fn(f64) -> f64 + Copy + 'static> GradFn<D> for UnaryGradFn<D, F> {
+impl<const D: usize, F, B> GradFn<D> for UnaryGradFn<D, F, B>
+where
+    F: Fn(f64) -> f64 + Copy + 'static,
+    B: Fn(f64, f64, f64) -> f64 + Copy + 'static,
+{
     fn name(&self) -> &str {
         self.name
     }
 
     fn forward(self) -> Tensor<D> {
         Tensor {
-            data: Rc::new(self.a.data.unary_op(self.fwd_fn)),
+            data: Rc::new(self.f.data.unary_op(self.forward_fn)),
             grad_fn: Some(Rc::new(self)),
         }
     }
 
-    fn backward(&self, diff_var: Tensor<D>) -> Tensor<D> {
-        todo!()
+    fn backward(&self, diff_var: &Tensor<D>) -> Tensor<D> {
+        let df = self.f.grad(diff_var);
+
+        let data = TensorData {
+            shape: self.f.data.shape,
+            inner: (0..self.f.data.len())
+                .map(|i| {
+                    (self.backward_fn)(
+                        self.f.data.inner[i],
+                        df.data.inner[i],
+                        diff_var.data.inner[i],
+                    )
+                })
+                .collect(),
+        };
+
+        Tensor {
+            data: data.into(),
+            grad_fn: None,
+        }
     }
 }
 
 #[derive(PartialEq)]
-pub struct BinaryGradFn<const D: usize, F: Fn(f64, f64) -> f64> {
+pub struct BinaryGradFn<const D: usize, F, B>
+where
+    F: Fn(f64, f64) -> f64,
+    B: Fn(f64, f64, f64, f64, f64) -> f64,
+{
     name: &'static str,
-    a: Tensor<D>,
-    b: Tensor<D>,
-    fwd_fn: F,
+    f: Tensor<D>,
+    g: Tensor<D>,
+    forward_fn: F,
+    backward_fn: B,
 }
 
-impl<const D: usize, F: Fn(f64, f64) -> f64 + Copy + 'static> GradFn<D> for BinaryGradFn<D, F> {
+impl<const D: usize, F, B> GradFn<D> for BinaryGradFn<D, F, B>
+where
+    F: Fn(f64, f64) -> f64 + Copy + 'static,
+    B: Fn(f64, f64, f64, f64, f64) -> f64 + Copy + 'static,
+{
     fn name(&self) -> &str {
         self.name
     }
 
     fn forward(self) -> Tensor<D> {
         Tensor {
-            data: Rc::new(self.a.data.binary_op(&self.b.data, self.fwd_fn)),
+            data: Rc::new(self.f.data.binary_op(&self.g.data, self.forward_fn)),
             grad_fn: Some(Rc::new(self)),
         }
     }
 
-    fn backward(&self, diff_var: Tensor<D>) -> Tensor<D> {
-        todo!()
+    fn backward(&self, diff_var: &Tensor<D>) -> Tensor<D> {
+        let df = self.f.grad(diff_var);
+        let dg = self.g.grad(diff_var);
+
+        let data = TensorData {
+            shape: self.f.data.shape,
+            inner: (0..self.f.data.len())
+                .map(|i| {
+                    (self.backward_fn)(
+                        self.f.data.inner[i],
+                        df.data.inner[i],
+                        self.g.data.inner[i],
+                        dg.data.inner[i],
+                        diff_var.data.inner[i],
+                    )
+                })
+                .collect(),
+        };
+
+        Tensor {
+            data: data.into(),
+            grad_fn: None,
+        }
     }
 }
 
@@ -471,7 +533,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_basic_autograd() {
+    fn test_add_mul_autograd() {
+        let m = Tensor::from([1.1]);
+        let x = Tensor::from([2.2]);
+        let b = Tensor::from([3.3]);
+
+        let y = &m * &x + &b;
+        let grad_y_x = y.grad(&x);
+
+        assert_abs_diff_eq!(Tensor::from([5.72]), y, epsilon = 1e-4);
+        assert_abs_diff_eq!(Tensor::from([1.1]), grad_y_x, epsilon = 1e-4);
+    }
+
+    #[test]
+    fn test_bce_autograd() {
         let y = Tensor::from([1.0]);
         let x1 = Tensor::from([1.1]);
         let w1 = Tensor::from([2.2]);
@@ -482,11 +557,16 @@ mod tests {
 
         let loss = fns::binary_cross_entropy(&a, &y);
 
-        let grad_loss_w1 = loss.grad(&w1);
-        let grad_loss_b = loss.grad(&b);
-
         assert_abs_diff_eq!(Tensor::from([0.0852]), loss, epsilon = 1e-4);
-        assert_abs_diff_eq!(Tensor::from([-0.0898]), grad_loss_w1, epsilon = 1e-4);
-        assert_abs_diff_eq!(Tensor::from([-0.0817]), grad_loss_b, epsilon = 1e-4);
+
+        assert_abs_diff_eq!(Tensor::from([1.0]), w1.grad(&w1), epsilon = 1e-4);
+        assert_abs_diff_eq!(Tensor::from([1.1]), z.grad(&w1), epsilon = 1e-4);
+        assert_abs_diff_eq!(Tensor::from([0.0825]), a.grad(&w1), epsilon = 1e-4);
+        assert_abs_diff_eq!(Tensor::from([-0.0898]), loss.grad(&w1), epsilon = 1e-4);
+
+        assert_abs_diff_eq!(Tensor::from([1.0]), b.grad(&b), epsilon = 1e-4);
+        assert_abs_diff_eq!(Tensor::from([1.0]), z.grad(&b), epsilon = 1e-4);
+        assert_abs_diff_eq!(Tensor::from([0.075]), a.grad(&b), epsilon = 1e-4);
+        assert_abs_diff_eq!(Tensor::from([-0.0817]), loss.grad(&b), epsilon = 1e-4);
     }
 }

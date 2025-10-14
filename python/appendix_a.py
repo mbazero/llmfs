@@ -34,7 +34,7 @@ def _():
 
     grad_L_w1 = grad(loss, w1, retain_graph=True)
     grad_L_b = grad(loss, b, retain_graph=True)
-    return F, a, grad_L_b, grad_L_w1, loss, y, z
+    return a, b, grad, grad_L_b, grad_L_w1, w1, z
 
 
 @app.cell
@@ -45,13 +45,20 @@ def _(grad_L_b, grad_L_w1):
 
 
 @app.cell
-def _(F, a, loss, y, z):
-    loss_tensor = F.binary_cross_entropy(a, y, reduction='none')
+def _(a, grad, grad_L_w1, w1, z):
+    print(grad(w1, w1, retain_graph=True))
+    print(grad(z, w1, retain_graph=True))
+    print(grad(a, w1, retain_graph=True))
+    print(grad_L_w1)
+    return
 
-    print(z)
-    print(a)
-    print(loss_tensor)
-    print(loss)
+
+@app.cell
+def _(a, b, grad, grad_L_b, z):
+    print(grad(b, b, retain_graph=True))
+    print(grad(z, b, retain_graph=True))
+    print(grad(a, b, retain_graph=True))
+    print(grad_L_b)
     return
 
 

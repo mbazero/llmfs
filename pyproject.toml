@@ -7,6 +7,7 @@ requires-python = ">=3.13"
 dependencies = [
     "marimo[recommended]>=0.16.5",
     "python-lsp-server>=1.13.1",
+    "rich>=14.2.0",
     "torch>=2.8.0",
     "torchvision>=0.23.0",
 ]

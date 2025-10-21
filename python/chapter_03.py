@@ -346,6 +346,175 @@ def _(SelfAttention_v1, SelfAttention_v2, d_in, d_out, inputs, nn, torch):
     return
 
 
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(
+        r"""
+    # 3.5 Hiding future words with causal attention
+    - Only want to consider tokens that appear prior to the current position when predicting the next token
+    """
+    )
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(
+        r"""
+    ## 3.5.1 Applying a causal attention mask
+    - Naive masking method:
+      1. Normalize attention scores into attention weights with softmax
+      2. Mask attention weights above diagonal with 0's
+      3. Re-normalize non-masked elements so each row sums to 1
+    - Efficient masking method
+      1. Mask attention scores above diagonal with -inf's
+      2. Normalized masked attention scores into attention weights with softmax
+    - The efficient method works because softmax converts inputs into a probability distribution and -inf values are treated as zero probability
+    """
+    )
+    return
+
+
+@app.cell
+def _(inputs, sa_v2, torch):
+    def compute_masked_attention_weights_naive():
+        queries = sa_v2.W_query(inputs)
+        keys = sa_v2.W_key(inputs) 
+        attn_scores = queries @ keys.T
+        attn_weights = torch.softmax(attn_scores / keys.shape[-1]**0.5, dim=-1)
+        print(f"{attn_weights=}")
+
+        context_length = attn_scores.shape[0]
+        mask_simple = torch.tril(torch.ones(context_length, context_length))
+        print(f"{mask_simple=}")
+
+        masked_simple = attn_weights*mask_simple
+        print(f"{masked_simple=}")
+
+        row_sums = masked_simple.sum(dim=-1, keepdim=True)
+        masked_simple_norm = masked_simple / row_sums
+        print(f"{masked_simple_norm}")
+
+    compute_masked_attention_weights_naive()
+    return
+
+
+@app.cell
+def _(inputs, sa_v2, torch):
+    def compute_masked_attention_weights_efficient():
+        queries = sa_v2.W_query(inputs)
+        keys = sa_v2.W_key(inputs) 
+        attn_scores = queries @ keys.T
+    
+        context_length = attn_scores.shape[0]
+        mask = torch.triu(torch.ones(context_length, context_length), diagonal=1)
+        print(f"{mask=}")
+    
+        masked = attn_scores.masked_fill(mask.bool(), -torch.inf)
+        print(f"{masked=}")
+    
+        attn_weights = torch.softmax(masked / keys.shape[-1]**0.5, dim=-1)
+        print(f"{attn_weights}")
+
+    compute_masked_attention_weights_efficient()
+    return
+
+
+@app.cell
+def _(mo):
+    mo.md(
+        r"""
+    ## 3.5.2 Masking additional attention weights with dropout
+    - Dropout is a technique in the training stage of deep learning where hidden layer elements are randomly ignored--that is "dropped out"
+    - This technique helps to avoid overfitting by preventing the model from becoming too reliant on specific hidden layer units
+    - In attention heads, dropout is usually applied in one of two places:
+      1. After attention weights are computed
+      2. After applying attention weights to value vectors
+    - Option 1 is the more common variant so this is what we will use
+    - After an X% dropout is applied to attention weights, the remaining weights must be scalled up by a factor of 100/X
+      - This is essential to preserve the total attention mass
+    """
+    )
+    return
+
+
+@app.cell
+def _(attn_weights, torch):
+    def apply_dropout():
+        torch.manual_seed(123)
+        dropout = torch.nn.Dropout(0.5)
+        dropout_attn_weights = dropout(attn_weights)
+        print(f"{dropout_attn_weights=}")
+    apply_dropout()
+    return
+
+
+@app.cell
+def _(mo):
+    mo.md(
+        r"""
+    ## 3.5.3 Implementing a compact causal attention class
+    - Let's put it all together and implement a single, compact attention class
+    """
+    )
+    return
+
+
+@app.cell
+def _(inputs, torch):
+    batch = torch.stack((inputs, inputs), dim=0)
+    print(batch.shape)
+    return (batch,)
+
+
+@app.cell
+def _(nn, torch):
+    class CausalAttention(nn.Module):
+        def __init__(self, d_in, d_out, context_length,
+                    dropout, qkv_bias=False):
+            super().__init__()
+            self.d_out = d_out
+            self.W_query = nn.Linear(d_in, d_out, bias=qkv_bias)
+            self.W_key   = nn.Linear(d_in, d_out, bias=qkv_bias)
+            self.W_value = nn.Linear(d_in, d_out, bias=qkv_bias)
+            self.dropout = nn.Dropout(dropout)
+            # NOTE: register buffer should be used for constant tensors.
+            # Among other things, it ensures that the constants are moved between devices appropriately.
+            self.register_buffer(
+               'mask',
+               torch.triu(torch.ones(context_length, context_length),
+               diagonal=1)
+            )
+
+        def forward(self, x):
+            b, num_tokens, d_in = x.shape
+            keys = self.W_key(x)
+            queries = self.W_query(x)
+            values = self.W_value(x)
+
+            attn_scores = queries @ keys.transpose(1, 2)   
+            attn_scores.masked_fill_(
+                self.mask.bool()[:num_tokens, :num_tokens], -torch.inf) 
+            attn_weights = torch.softmax(
+                attn_scores / keys.shape[-1]**0.5, dim=-1
+            )
+            attn_weights = self.dropout(attn_weights)
+
+            context_vec = attn_weights @ values
+            return context_vec
+    return (CausalAttention,)
+
+
+@app.cell
+def _(CausalAttention, batch, d_in, d_out, torch):
+    torch.manual_seed(123)
+    context_length = batch.shape[1]
+    ca = CausalAttention(d_in, d_out, context_length, 0.0)
+    context_vecs = ca(batch)
+    print("context_vecs.shape:", context_vecs.shape)
+    return
+
+
 @app.cell
 def _():
     return
